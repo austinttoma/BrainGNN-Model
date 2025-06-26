@@ -14,79 +14,83 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 
+import os
 import sys
 import argparse
-import pandas as pd
 import numpy as np
-from imports import preprocess_data as Reader
+import pandas as pd
 import deepdish as dd
-import warnings
-import os
 
-warnings.filterwarnings("ignore")
-root_folder = '/data/'
-data_folder = os.path.join(root_folder, 'ABIDE_pcp/cpac/filt_noglobal/')
+# === CONFIG ===
+subject_file = '/media/volume/ADNI-Data/git/BrainGNN-Model/data/subject_ID.txt'
+label_file = '/media/volume/ADNI-Data/git/BrainGNN-Model/data/TADPOLE_Simplified.csv'
+fc_matrix_dir = '/media/volume/ADNI-Data/git/BrainGNN-Model/data/FC_Matrix_Output_Parallel'
+output_dir = os.path.join(fc_matrix_dir, 'raw')
 
-# Process boolean command line arguments
-def str2bool(v):
-    if isinstance(v, bool):
-        return v
-    if v.lower() in ('yes', 'true', 't', 'y', '1'):
-        return True
-    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
-        return False
-    else:
-        raise argparse.ArgumentTypeError('Boolean value expected.')
+# === HELPERS ===
+def load_subject_ids(subject_file):
+    with open(subject_file, 'r') as f:
+        return [line.strip() for line in f]
 
+def load_labels_per_visit(label_file):
+    df = pd.read_csv(label_file)
+    df['Group'] = df['Group'].replace({'CN': 0, 'MCI': 1, 'AD': 2})
 
+    # Ensure required columns are present
+    assert all(col in df.columns for col in ['Subject', 'Visit_idx', 'Group']), \
+        "CSV must contain Subject, Visit, and Group columns"
+
+    # Sort by subject and visit
+    df = df.sort_values(by=['Subject', 'Visit_idx'])
+
+    # Shift labels per subject to get the *next* visit's label
+    df['NextLabel'] = df.groupby('Subject')['Group'].shift(-1)
+
+    # Drop rows where next label is NaN (i.e., no next visit)
+    df = df.dropna(subset=['NextLabel'])
+
+    # Build lookup dict: (subject_id, visit) → next label
+    label_lookup = {
+        (str(row['Subject']), int(row['Visit_idx'])): int(row['NextLabel'])
+        for _, row in df.iterrows()
+    }
+
+    return label_lookup
+
+def load_fc_matrix(subject_id, run, kind='correlation'):
+    fc_file = os.path.join(fc_matrix_dir, f"sub-{subject_id}_run-0{run}_fc.npy")
+    if os.path.exists(fc_file):
+        return np.load(fc_file)
+    return None
+
+# === MAIN ===
 def main():
-    parser = argparse.ArgumentParser(description='Classification of the ABIDE dataset using a Ridge classifier. '
-                                                 'MIDA is used to minimize the distribution mismatch between ABIDE sites')
-    parser.add_argument('--atlas', default='cc200',
-                        help='Atlas for network construction (node definition) options: ho, cc200, cc400, default: cc200.')
-    parser.add_argument('--seed', default=123, type=int, help='Seed for random initialisation. default: 1234.')
-    parser.add_argument('--nclass', default=2, type=int, help='Number of classes. default:2')
-
-
+    parser = argparse.ArgumentParser(description='Prepare ADNI fMRI data for classification with next visit labels')
+    parser.add_argument('--atlas', default='cc200', help='Atlas used: cc200, cc400, etc.')
+    parser.add_argument('--nclass', default=3, type=int, help='Number of classes. CN=0, MCI=1, AD=2')
+    parser.add_argument('--seed', default=123, type=int)
     args = parser.parse_args()
-    print('Arguments: \n', args)
 
+    os.makedirs(output_dir, exist_ok=True)
+    print("Parsers Clear")
+    subject_ids = load_subject_ids(subject_file)
+    label_lookup = load_labels_per_visit(label_file)
+    print("SubjectID and Label Clear")
+    for sid in subject_ids:
+        for run in range(1, 10):
+            fc = load_fc_matrix(sid, run)
+            if fc is None:
+                break  # No more runs for this subject
 
-    params = dict()
+            key = (sid, run)
+            if key not in label_lookup:
+                print(f"[!] Skipping {sid} run-{run}: no next label available")
+                continue
 
-    params['seed'] = args.seed  # seed for random initialisation
-
-    # Algorithm choice
-    params['atlas'] = args.atlas  # Atlas for network construction
-    atlas = args.atlas  # Atlas for network construction (node definition)
-
-    # Get subject IDs and class labels
-    subject_IDs = Reader.get_ids()
-    labels = Reader.get_subject_score(subject_IDs, score='DX_GROUP')
-
-    # Number of subjects and classes for binary classification
-    num_classes = args.nclass
-    num_subjects = len(subject_IDs)
-    params['n_subjects'] = num_subjects
-
-    # Initialise variables for class labels and acquisition sites
-    # 1 is autism, 2 is control
-    y_data = np.zeros([num_subjects, num_classes]) # n x 2
-    y = np.zeros([num_subjects, 1]) # n x 1
-
-    # Get class labels for all subjects
-    for i in range(num_subjects):
-        y_data[i, int(labels[subject_IDs[i]]) - 1] = 1
-        y[i] = int(labels[subject_IDs[i]])
-
-    # Compute feature vectors (vectorised connectivity networks)
-    fea_corr = Reader.get_networks(subject_IDs, iter_no='', kind='correlation', atlas_name=atlas) #(1035, 200, 200)
-    fea_pcorr = Reader.get_networks(subject_IDs, iter_no='', kind='partial correlation', atlas_name=atlas) #(1035, 200, 200)
-
-    if not os.path.exists(os.path.join(data_folder,'raw')):
-        os.makedirs(os.path.join(data_folder,'raw'))
-    for i, subject in enumerate(subject_IDs):
-        dd.io.save(os.path.join(data_folder,'raw',subject+'.h5'),{'corr':fea_corr[i],'pcorr':fea_pcorr[i],'label':y[i]%2})
+            label = label_lookup[key]
+            save_path = os.path.join(output_dir, f"sub-{sid}_run-{run}.h5")
+            dd.io.save(save_path, {'corr': fc, 'label': label})
+            print(f"[✓] Saved: {save_path} with label={label}")
 
 if __name__ == '__main__':
     main()

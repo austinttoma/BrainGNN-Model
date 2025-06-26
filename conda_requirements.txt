@@ -1,0 +1,14 @@
+numpy
+scipy
+scikit-learn
+pandas
+matplotlib
+networkx
+h5py
+nibabel
+mkl
+cython
+pytorch
+torchvision
+torchaudio
+pytorch-cuda=11.8

@@ -17,87 +17,70 @@
 '''
 This script mainly refers to https://github.com/kundaMwiza/fMRI-site-adaptation/blob/master/fetch_data.py
 '''
-
-from nilearn import datasets
-import argparse
-from imports import preprocess_data as Reader
-import os
-import shutil
-import sys
-
-# Input data variables
-code_folder = os.getcwd()
-root_folder = '/data/'
-data_folder = os.path.join(root_folder, 'ABIDE_pcp/cpac/filt_noglobal/')
-if not os.path.exists(data_folder):
-    os.makedirs(data_folder)
-shutil.copyfile(os.path.join(root_folder,'subject_ID.txt'), os.path.join(data_folder, 'subject_IDs.txt'))
-
-def str2bool(v):
-    if isinstance(v, bool):
-        return v
-    if v.lower() in ('yes', 'true', 't', 'y', '1'):
-        return True
-    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
-        return False
-    else:
-        raise argparse.ArgumentTypeError('Boolean value expected.')
-
-
 def main():
-    parser = argparse.ArgumentParser(description='Download ABIDE data and compute functional connectivity matrices')
-    parser.add_argument('--pipeline', default='cpac', type=str,
-                        help='Pipeline to preprocess ABIDE data. Available options are ccs, cpac, dparsf and niak.'
-                             ' default: cpac.')
-    parser.add_argument('--atlas', default='cc200',
-                        help='Brain parcellation atlas. Options: ho, cc200 and cc400, default: cc200.')
-    parser.add_argument('--download', default=True, type=str2bool,
-                        help='Dowload data or just compute functional connectivity. default: True')
-    args = parser.parse_args()
-    print(args)
+        import os
+        import numpy as np
+        from nilearn import datasets, input_data, connectome
+        from nilearn.maskers import NiftiLabelsMasker  # instead of input_data.NiftiLabelsMasker
+        
+        # === CONFIG ===
+        fmri_dir = '/media/volume/ADNI-Data/git/BrainGNN-Model/data/fmriprep_output'
+        subject_file = '/media/volume/ADNI-Data/git/BrainGNN-Model/data/subject_ID.txt'
+        output_dir = '/media/volume/ADNI-Data/git/BrainGNN-Model/data/FC_Matrix_Output'
+        atlas_name = 'cc200'
+        correlation_type = 'correlation'
 
-    params = dict()
+        # === ATLAS LOADING ===
+        atlas_data = datasets.fetch_atlas_aal()
+        atlas_img = atlas_data.maps
+        labels = atlas_data.labels
+        masker = input_data.NiftiLabelsMasker(labels_img=atlas_img,
+                                            standardize=True,
+                                            detrend=True,
+                                            memory='nilearn_cache',
+                                            verbose=0)
 
-    pipeline = args.pipeline
-    atlas = args.atlas
-    download = args.download
+        # === OUTPUT DIRECTORY ===
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
 
-    # Files to fetch
+        # === SUBJECT LOOP ===
+        with open(subject_file, 'r') as f:
+            subjects = [line.strip() for line in f]
 
-    files = ['rois_' + atlas]
+        for sid in subjects:
+            current_run = 1
+            while True:
+                nifti_path = os.path.join(
+                    fmri_dir,
+                    f"sub-{sid}",
+                    "func",
+                    f"sub-{sid}_task-rest_run-0{current_run}_space-MNI152NLin2009cAsym_desc-preproc_bold.nii.gz"
+                )
 
-    filemapping = {'func_preproc': 'func_preproc.nii.gz',
-                   files[0]: files[0] + '.1D'}
+                if not os.path.exists(nifti_path):
+                    # If this run does not exist, break and move to next subject
+                    if current_run == 1:
+                        print(f"[!] No runs found for subject {sid}")
+                    break  # exit while loop, move to next subject
 
+                try:
+                    print(f"[+] Processing subject {sid}, run {current_run} ...")
+                    timeseries = masker.fit_transform(nifti_path)
 
-    # Download database files
-    if download == True:
-        abide = datasets.fetch_abide_pcp(data_dir=root_folder, pipeline=pipeline,
-                                         band_pass_filtering=True, global_signal_regression=False, derivatives=files,
-                                         quality_checked=False)
+                    # Compute connectivity matrix
+                    conn = connectome.ConnectivityMeasure(kind=correlation_type)
+                    matrix = conn.fit_transform([timeseries])[0]
 
-    subject_IDs = Reader.get_ids() #changed path to data path
-    subject_IDs = subject_IDs.tolist()
+                    # Save matrix
+                    save_path = os.path.join(output_dir, f"sub-{sid}_run-0{current_run}_fc.npy")
+                    np.save(save_path, matrix)
+                    print(f"[✓] Saved to {save_path}")
 
-    # Create a folder for each subject
-    for s, fname in zip(subject_IDs, Reader.fetch_filenames(subject_IDs, files[0], atlas)):
-        subject_folder = os.path.join(data_folder, s)
-        if not os.path.exists(subject_folder):
-            os.mkdir(subject_folder)
+                except Exception as e:
+                    print(f"[!] Error processing sub-{sid} run-{current_run}: {e}")
 
-        # Get the base filename for each subject
-        base = fname.split(files[0])[0]
-
-        # Move each subject file to the subject folder
-        for fl in files:
-            if not os.path.exists(os.path.join(subject_folder, base + filemapping[fl])):
-                shutil.move(base + filemapping[fl], subject_folder)
-
-    time_series = Reader.get_timeseries(subject_IDs, atlas)
-
-    # Compute and save connectivity matrices
-    Reader.subject_connectivity(time_series, subject_IDs, atlas, 'correlation')
-    Reader.subject_connectivity(time_series, subject_IDs, atlas, 'partial correlation')
+                current_run += 1  # move to next run
 
 
 if __name__ == '__main__':

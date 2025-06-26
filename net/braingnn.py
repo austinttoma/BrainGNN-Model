@@ -54,7 +54,10 @@ class Network(torch.nn.Module):
         x = self.conv1(x, edge_index, edge_attr, pos)
         x, edge_index, edge_attr, batch, perm, score1 = self.pool1(x, edge_index, edge_attr, batch)
 
-        pos = pos[perm]
+        # Some datasets may not contain positional encodings. Guard against
+        # None so that training can proceed without them.
+        if pos is not None:
+            pos = pos[perm]
         x1 = torch.cat([gmp(x, batch), gap(x, batch)], dim=1)
 
         edge_attr = edge_attr.squeeze()
@@ -72,7 +75,7 @@ class Network(torch.nn.Module):
         x= F.dropout(x, p=0.5, training=self.training)
         x = F.log_softmax(self.fc3(x), dim=-1)
 
-        return x,self.pool1.weight,self.pool2.weight, torch.sigmoid(score1).view(x.size(0),-1), torch.sigmoid(score2).view(x.size(0),-1)
+        return x,self.pool1.select.weight,self.pool2.select.weight, torch.sigmoid(score1).view(x.size(0),-1), torch.sigmoid(score2).view(x.size(0),-1)
 
     def augment_adj(self, edge_index, edge_weight, num_nodes):
         edge_index, edge_weight = add_self_loops(edge_index, edge_weight,

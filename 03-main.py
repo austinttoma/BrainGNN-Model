@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from torch.optim import lr_scheduler
 from tensorboardX import SummaryWriter
 
-from imports.ABIDEDataset import ABIDEDataset
+from imports.ADNIDataset import ADNIDataset
 from torch_geometric.data import DataLoader
 from net.braingnn import Network
 from imports.utils import train_val_test_split
@@ -41,7 +41,7 @@ parser.add_argument('--layer', type=int, default=2, help='number of GNN layers')
 parser.add_argument('--ratio', type=float, default=0.5, help='pooling ratio')
 parser.add_argument('--indim', type=int, default=200, help='feature dim')
 parser.add_argument('--nroi', type=int, default=200, help='num of ROIs')
-parser.add_argument('--nclass', type=int, default=2, help='num of classes')
+parser.add_argument('--nclass', type=int, default=3, help='num of classes')
 parser.add_argument('--load_model', type=bool, default=False)
 parser.add_argument('--save_model', type=bool, default=True)
 parser.add_argument('--optim', type=str, default='Adam', help='optimization method: SGD, Adam')
@@ -52,8 +52,8 @@ if not os.path.exists(opt.save_path):
     os.makedirs(opt.save_path)
 
 #################### Parameter Initialization #######################
-path = opt.dataroot
-name = 'ABIDE'
+path = "/media/volume/ADNI-Data/git/BrainGNN-Model/data/FC_Matrix_Output_Parallel"
+name = 'ADNI'
 save_model = opt.save_model
 load_model = opt.load_model
 opt_method = opt.optim
@@ -65,11 +65,13 @@ writer = SummaryWriter(os.path.join('./log',str(fold)))
 
 ################## Define Dataloader ##################################
 
-dataset = ABIDEDataset(path,name)
+dataset = ADNIDataset(path, name)
 dataset.data.y = dataset.data.y.squeeze()
 dataset.data.x[dataset.data.x == float('inf')] = 0
 
 tr_index,val_index,te_index = train_val_test_split(fold=fold)
+print(f"[DEBUG] Dataset length: {len(dataset)}")
+print(f"[DEBUG] Max tr_index: {max(tr_index)}")
 train_dataset = dataset[tr_index]
 val_dataset = dataset[val_index]
 test_dataset = dataset[te_index]
@@ -82,7 +84,21 @@ test_loader = DataLoader(test_dataset, batch_size=opt.batchSize, shuffle=False)
 
 
 ############### Define Graph Deep Learning Network ##########################
-model = Network(opt.indim,opt.ratio,opt.nclass).to(device)
+# Infer node feature/ROI dimension directly from the dataset to avoid hard-coded
+# mismatches when switching between parcellations (e.g. 116 ROI vs 200 ROI).
+# Each graph has shape [num_nodes, num_features]; use the first graph as
+# reference (all graphs should share the same dimensionality).
+
+inferred_indim = dataset[0].x.size(1)
+
+# Override the command-line value so the rest of the script (including the
+# checkpoint name) reflects the real dimension.
+opt.indim = inferred_indim
+
+# Build the network. We also set R (number of ROIs) to the same value so the
+# internal linear layers match the true input size.
+model = Network(opt.indim, opt.ratio, opt.nclass, R=opt.indim).to(device)
+
 print(model)
 
 if opt_method == 'Adam':
@@ -228,7 +244,8 @@ for epoch in range(0, num_epoch):
 #######################################################################################
 
 if opt.load_model:
-    model = Network(opt.indim,opt.ratio,opt.nclass).to(device)
+    # Reconstruct model with the same inferred dimension when loading
+    model = Network(opt.indim,opt.ratio,opt.nclass, R=opt.indim).to(device)
     model.load_state_dict(torch.load(os.path.join(opt.save_path,str(fold)+'.pth')))
     model.eval()
     preds = []
