@@ -25,7 +25,7 @@ import deepdish as dd
 subject_file = '/media/volume/ADNI-Data/git/BrainGNN-Model/data/subject_ID.txt'
 label_file = '/media/volume/ADNI-Data/git/BrainGNN-Model/data/TADPOLE_Simplified.csv'
 fc_matrix_dir = '/media/volume/ADNI-Data/git/BrainGNN-Model/data/FC_Matrix_Output_Parallel'
-output_dir = os.path.join(fc_matrix_dir, 'raw')
+output_dir = os.path.join(fc_matrix_dir, 'raw_same')
 
 # === HELPERS ===
 def load_subject_ids(subject_file):
@@ -38,20 +38,14 @@ def load_labels_per_visit(label_file):
 
     # Ensure required columns are present
     assert all(col in df.columns for col in ['Subject', 'Visit_idx', 'Group']), \
-        "CSV must contain Subject, Visit, and Group columns"
+        "CSV must contain Subject, Visit_idx, and Group columns"
 
-    # Sort by subject and visit
+    # Sort by subject and visit (optional, but keeps order clean)
     df = df.sort_values(by=['Subject', 'Visit_idx'])
 
-    # Shift labels per subject to get the *next* visit's label
-    df['NextLabel'] = df.groupby('Subject')['Group'].shift(-1)
-
-    # Drop rows where next label is NaN (i.e., no next visit)
-    df = df.dropna(subset=['NextLabel'])
-
-    # Build lookup dict: (subject_id, visit) → next label
+    # Build lookup dict: (subject_id, visit) → current label (Group)
     label_lookup = {
-        (str(row['Subject']), int(row['Visit_idx'])): int(row['NextLabel'])
+        (str(row['Subject']), int(row['Visit_idx'])): int(row['Group'])
         for _, row in df.iterrows()
     }
 
@@ -81,11 +75,6 @@ def main():
             fc = load_fc_matrix(sid, run)
             if fc is None:
                 break  # No more runs for this subject
-
-            key = (sid, run)
-            if key not in label_lookup:
-                print(f"[!] Skipping {sid} run-{run}: no next label available")
-                continue
 
             label = label_lookup[key]
             save_path = os.path.join(output_dir, f"sub-{sid}_run-{run}.h5")

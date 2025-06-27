@@ -14,6 +14,8 @@ from torch_geometric.data import DataLoader
 from net.braingnn import Network
 from imports.utils import train_val_test_split
 from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.utils.class_weight import compute_class_weight
+from ClassFocus import FocalLoss
 
 torch.manual_seed(123)
 
@@ -131,48 +133,75 @@ def consist_loss(s):
 ###################### Network Training Function#####################################
 def train(epoch):
     print('train...........')
+    model.train()
     scheduler.step()
 
     for param_group in optimizer.param_groups:
         print("LR", param_group['lr'])
-    model.train()
+
     s1_list = []
     s2_list = []
     loss_all = 0
     step = 0
+
+    all_preds = []
+    all_labels = []
+
     for data in train_loader:
         data = data.to(device)
         optimizer.zero_grad()
+
         output, w1, w2, s1, s2 = model(data.x, data.edge_index, data.batch, data.edge_attr, data.pos)
+
         s1_list.append(s1.view(-1).detach().cpu().numpy())
         s2_list.append(s2.view(-1).detach().cpu().numpy())
 
-        loss_c = F.nll_loss(output, data.y)
+        # Track predictions and labels
+        preds = output.argmax(dim=1)
+        all_preds.append(preds.cpu().numpy())
+        all_labels.append(data.y.cpu().numpy())
 
+        # Compute class weights dynamically
+        train_labels = [int(data.y.item()) for data in train_dataset]
+        unique_classes = np.unique(train_labels)
+        class_weights = compute_class_weight(class_weight='balanced', classes=unique_classes, y=train_labels)
+        weights = torch.tensor(class_weights, dtype=torch.float32, device=device)
+
+        focal_loss_fn = FocalLoss(alpha=weights, gamma=1.5).to(device)
+        loss_c = focal_loss_fn(output, data.y)
         loss_p1 = (torch.norm(w1, p=2)-1) ** 2
         loss_p2 = (torch.norm(w2, p=2)-1) ** 2
         loss_tpk1 = topk_loss(s1,opt.ratio)
         loss_tpk2 = topk_loss(s2,opt.ratio)
-        loss_consist = 0
-        for c in range(opt.nclass):
-            loss_consist += consist_loss(s1[data.y == c])
+        loss_consist = sum([consist_loss(s1[data.y == c]) for c in range(opt.nclass)])
+
         loss = opt.lamb0*loss_c + opt.lamb1 * loss_p1 + opt.lamb2 * loss_p2 \
-                   + opt.lamb3 * loss_tpk1 + opt.lamb4 *loss_tpk2 + opt.lamb5* loss_consist
+               + opt.lamb3 * loss_tpk1 + opt.lamb4 *loss_tpk2 + opt.lamb5* loss_consist
+
         writer.add_scalar('train/classification_loss', loss_c, epoch*len(train_loader)+step)
         writer.add_scalar('train/unit_loss1', loss_p1, epoch*len(train_loader)+step)
         writer.add_scalar('train/unit_loss2', loss_p2, epoch*len(train_loader)+step)
         writer.add_scalar('train/TopK_loss1', loss_tpk1, epoch*len(train_loader)+step)
         writer.add_scalar('train/TopK_loss2', loss_tpk2, epoch*len(train_loader)+step)
         writer.add_scalar('train/GCL_loss', loss_consist, epoch*len(train_loader)+step)
-        step = step + 1
 
         loss.backward()
-        loss_all += loss.item() * data.num_graphs
         optimizer.step()
 
-        s1_arr = np.hstack(s1_list)
-        s2_arr = np.hstack(s2_list)
-    return loss_all / len(train_dataset), s1_arr, s2_arr ,w1,w2
+        loss_all += loss.item() * data.num_graphs
+        step += 1
+
+    s1_arr = np.hstack(s1_list)
+    s2_arr = np.hstack(s2_list)
+
+    # Print confusion matrix
+    all_preds = np.concatenate(all_preds)
+    all_labels = np.concatenate(all_labels)
+    cm = confusion_matrix(all_labels, all_preds)
+    print(f"[Epoch {epoch}] Confusion Matrix (Train):")
+    print(cm)
+
+    return loss_all / len(train_dataset), s1_arr, s2_arr, w1, w2
 
 
 ###################### Network Testing Function#####################################
@@ -270,4 +299,19 @@ else:
    print("===========================")
    print("Test Acc: {:.7f}, Test Loss: {:.7f} ".format(test_accuracy, test_l))
    print(opt)
+all_preds = []
+all_labels = []
+
+for data in test_loader:
+    data = data.to(device)
+    outputs = model(data.x, data.edge_index, data.batch, data.edge_attr, data.pos)
+    pred = outputs[0].argmax(dim=1)
+    all_preds.append(pred.cpu().numpy())
+    all_labels.append(data.y.cpu().numpy())
+
+all_preds = np.concatenate(all_preds)
+all_labels = np.concatenate(all_labels)
+
+print(classification_report(all_labels, all_preds, digits=4))    
+
 
